@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: supermarket-backend
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: FAST2SMS_API_KEY
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
