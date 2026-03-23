@@ -9,18 +9,40 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
+const configuredCorsOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 const allowedOrigins = [
   'http://localhost:8081',
   'http://localhost:5173',
   'http://127.0.0.1:8081',
   'http://127.0.0.1:5173',
   PUBLIC_BASE_URL,
+  ...configuredCorsOrigins,
 ];
+const allowVercelPreviews = String(process.env.ALLOW_VERCEL_PREVIEWS || '').toLowerCase() === 'true';
+const vercelPreviewOriginPattern = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i;
 
-// Middleware
-app.use(cors({
+function isAllowedOrigin(origin) {
+  if (!origin) {
+    return true;
+  }
+
+  if (allowedOrigins.includes(origin)) {
+    return true;
+  }
+
+  if (allowVercelPreviews && vercelPreviewOriginPattern.test(origin)) {
+    return true;
+  }
+
+  return false;
+}
+
+const corsOptions = {
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (isAllowedOrigin(origin)) {
       callback(null, true);
       return;
     }
@@ -29,8 +51,11 @@ app.use(cors({
   },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-}));
-app.options('*', cors());
+};
+
+// Middleware
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 
 // Fast2SMS configuration
