@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
@@ -8,14 +9,47 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
+const allowedOrigins = [
+  'http://localhost:8081',
+  'http://localhost:5173',
+  'http://127.0.0.1:8081',
+  'http://127.0.0.1:5173',
+  PUBLIC_BASE_URL,
+];
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+app.options('*', cors());
 app.use(express.json());
 
 // Fast2SMS configuration
 const fast2smsApiKey = process.env.FAST2SMS_API_KEY;
 const smsEnabled = !!fast2smsApiKey;
+
+// Razorpay configuration
+const Razorpay = require('razorpay');
+const razorpayKeyId = (process.env.RAZORPAY_KEY_ID || '').trim();
+const razorpayKeySecret = (process.env.RAZORPAY_KEY_SECRET || '').trim();
+const razorpayEnabled = !!(razorpayKeyId && razorpayKeySecret);
+
+let razorpayInstance = null;
+if (razorpayEnabled) {
+  razorpayInstance = new Razorpay({ key_id: razorpayKeyId, key_secret: razorpayKeySecret });
+  console.log('✅ Razorpay configured');
+} else {
+  console.log('💳 Razorpay running in TEST mode (no keys configured)');
+}
 
 if (smsEnabled) {
   console.log('✅ Fast2SMS configured - Real SMS will be sent');
@@ -171,6 +205,98 @@ Thank you for shopping with us!`;
     });
   }
 });
+
+// ─── Razorpay Routes ─────────────────────────────────────────────────────────
+
+// Create order
+app.post('/api/razorpay/create-order', async (req, res) => {
+  const { amount, currency = 'INR', receipt, customerName, customerPhone } = req.body;
+
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ error: 'Valid amount is required' });
+  }
+
+  // Test / demo mode — return a mock order so the frontend can still flow
+  if (!razorpayEnabled) {
+    const mockOrder = {
+      id: `order_demo_${Date.now()}`,
+      amount: amount,
+      currency,
+      receipt,
+      status: 'created',
+      _demo: true,
+    };
+    console.log('💳 DEMO Razorpay order created:', mockOrder.id);
+    return res.json(mockOrder);
+  }
+
+  try {
+    const order = await razorpayInstance.orders.create({
+      amount: parseInt(amount, 10),
+      currency,
+      receipt: receipt || `rcpt_${Date.now()}`,
+      notes: {
+        customerName: customerName || '',
+        customerPhone: customerPhone || '',
+      },
+    });
+
+    console.log('✅ Razorpay order created:', order.id);
+    res.json(order);
+  } catch (error) {
+    const details = error?.error?.description || error?.description || error?.message || 'Failed to create Razorpay order';
+    console.error('❌ Razorpay order creation failed:', details);
+
+    if (typeof details === 'string' && details.toLowerCase().includes('authentication failed')) {
+      return res.json({
+        amount: parseInt(amount, 10),
+        currency,
+        receipt,
+        status: 'fallback',
+        _fallback: true,
+        error: details,
+      });
+    }
+
+    res.status(500).json({ error: details });
+  }
+});
+
+// Verify payment signature
+app.post('/api/razorpay/verify-payment', (req, res) => {
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+    return res.status(400).json({ success: false, error: 'Missing payment verification fields' });
+  }
+
+  // Demo mode — auto-approve
+  if (!razorpayEnabled || razorpay_order_id.startsWith('order_demo_')) {
+    console.log('💳 DEMO payment verified for order:', razorpay_order_id);
+    return res.json({ success: true, demo: true, message: 'Demo payment verified' });
+  }
+
+  try {
+    const body = `${razorpay_order_id}|${razorpay_payment_id}`;
+    const expectedSignature = crypto
+      .createHmac('sha256', razorpayKeySecret)
+      .update(body)
+      .digest('hex');
+
+    if (expectedSignature === razorpay_signature) {
+      console.log('✅ Razorpay signature verified for:', razorpay_payment_id);
+      res.json({ success: true, message: 'Payment verified' });
+    } else {
+      console.warn('⚠️ Razorpay signature mismatch for:', razorpay_payment_id);
+      res.status(400).json({ success: false, error: 'Invalid payment signature' });
+    }
+  } catch (error) {
+    console.error('❌ Payment verification error:', error.message);
+    res.status(500).json({ success: false, error: 'Verification failed' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Start server
 app.listen(PORT, () => {
